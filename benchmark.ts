@@ -3,17 +3,24 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { exec, spawn } from 'child_process';
+import { exec, spawn, type ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import { chromium } from 'playwright';
 import { runBenchmark as runSigridBenchmark } from './scripts/sigrid-runner.js';
 import { openWorkspace } from 'sigrid';
+import type { BenchmarkResult } from './types.js';
 
 const execAsync = promisify(exec);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Test prompt type
+export interface TestPrompt {
+  id: string;
+  prompt: string;
+}
+
 // Embedded test prompts
-export const TEST_PROMPTS = [
+export const TEST_PROMPTS: TestPrompt[] = [
   {
     id: 'todo-app',
     prompt: 'Build a simple todo app with add, complete, and delete functionality'
@@ -28,17 +35,81 @@ export const TEST_PROMPTS = [
   }
 ];
 
+// Extended benchmark result with all pipeline steps
+export interface FullBenchmarkResult extends BenchmarkResult {
+  id: string;
+  success: boolean;
+  compile?: CompileResult;
+  run?: RunResult;
+  analyze?: AnalyzeResult;
+  error?: string;
+}
+
+export interface CompileResult {
+  success: boolean;
+  duration: number;
+  buildDuration?: number;
+  installDuration?: number;
+  installNeeded?: boolean;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+}
+
+export interface RunResult {
+  success: boolean;
+  serverUrl?: string;
+  process?: ChildProcess;
+  duration: number;
+  output?: string;
+  error?: string;
+}
+
+export interface AnalyzeResult {
+  success: boolean;
+  duration: number;
+  navigationDuration?: number;
+  screenshotPath?: string;
+  title?: string;
+  metrics?: {
+    url: string;
+    readyState: string;
+    bodyChildren: number;
+  };
+  consoleMessages?: Array<{ type: string; text: string }>;
+  consoleErrors?: string[];
+  pageErrors?: string[];
+  hasErrors?: boolean;
+  error?: string;
+}
+
+export interface BenchmarkOptions {
+  model?: string;
+  runner?: string;
+  resultsDir?: string;
+  keepWorkspaces?: boolean;
+}
+
+export interface BenchmarkSummary {
+  runner: string;
+  model: string;
+  timestamp: string;
+  totalDuration: number;
+  totalPrompts: number;
+  successCount: number;
+  failureCount: number;
+  keepWorkspaces: boolean;
+  results: FullBenchmarkResult[];
+  summaryFile?: string;
+}
+
 /**
  * Run benchmarks for given prompts
- * @param {Array|string} prompts - Array of prompt objects with {id, prompt} or single prompt string
- * @param {object} options - Benchmark options
- * @param {string} options.model - Model to use (default: gpt-4o-mini)
- * @param {string} options.runner - Runner to use (default: sigrid)
- * @param {string} options.resultsDir - Results directory path
- * @param {boolean} options.keepWorkspaces - Keep workspaces after benchmark (default: false)
- * @returns {Promise<object>} Benchmark results summary
  */
-export async function runBenchmark(prompts, options = {}) {
+export async function runBenchmark(
+  prompts: TestPrompt[] | string,
+  options: BenchmarkOptions = {}
+): Promise<BenchmarkSummary> {
   const {
     model = 'gpt-4o-mini',
     runner = 'sigrid',
@@ -47,7 +118,7 @@ export async function runBenchmark(prompts, options = {}) {
   } = options;
 
   // Normalize prompts to array format
-  let promptsToRun = [];
+  let promptsToRun: TestPrompt[] = [];
   if (typeof prompts === 'string') {
     promptsToRun = [{ id: 'custom', prompt: prompts }];
   } else if (Array.isArray(prompts)) {
@@ -63,9 +134,9 @@ export async function runBenchmark(prompts, options = {}) {
     throw new Error(`Runner "${runner}" not supported yet`);
   }
 
-  const results = [];
+  const results: FullBenchmarkResult[] = [];
   const startTime = Date.now();
-  const runningProcesses = []; // Track running dev servers
+  const runningProcesses: Array<{ id: string; process: ChildProcess }> = [];
 
   // Ensure results directory exists
   await fs.mkdir(resultsDir, { recursive: true });
@@ -78,7 +149,7 @@ export async function runBenchmark(prompts, options = {}) {
     console.log(`Prompt: "${testPrompt.prompt}"`);
     console.log('='.repeat(60));
 
-    let serverProcess = null;
+    let serverProcess: ChildProcess | null = null;
 
     try {
       // Step 1-3: Run benchmark (generate code with sigrid)
@@ -123,30 +194,32 @@ export async function runBenchmark(prompts, options = {}) {
       console.log(`✅ ${testPrompt.id} - Compiled (${compileResult.duration}ms)`);
 
       // Step 5: Run the app
-      let runResult;
+      let runResult: RunResult;
       try {
         runResult = await runApp(benchmarkResult.workspaceDir);
-        serverProcess = runResult.process;
-        runningProcesses.push({ id: testPrompt.id, process: serverProcess });
+        serverProcess = runResult.process || null;
+        if (serverProcess) {
+          runningProcesses.push({ id: testPrompt.id, process: serverProcess });
+        }
       } catch (runError) {
         console.log(`\n❌ ${testPrompt.id} failed to start server`);
         runResult = {
           success: false,
-          error: runError.message,
+          error: runError instanceof Error ? runError.message : String(runError),
           duration: 0
         };
       }
 
       // Step 6: Analyze the app (only if server started successfully)
-      let analyzeResult;
+      let analyzeResult: AnalyzeResult;
       if (runResult.success) {
         try {
-          analyzeResult = await analyzeApp(runResult.serverUrl, testPrompt.id, resultsDir);
+          analyzeResult = await analyzeApp(runResult.serverUrl!, testPrompt.id, resultsDir);
         } catch (analyzeError) {
           console.log(`\n⚠️  ${testPrompt.id} analysis failed but continuing...`);
           analyzeResult = {
             success: false,
-            error: analyzeError.message,
+            error: analyzeError instanceof Error ? analyzeError.message : String(analyzeError),
             duration: 0
           };
         }
@@ -206,12 +279,23 @@ export async function runBenchmark(prompts, options = {}) {
       }
 
     } catch (error) {
-      console.error(`\n❌ Error running ${testPrompt.id}:`, error.message);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`\n❌ Error running ${testPrompt.id}:`, errorMessage);
       results.push({
         id: testPrompt.id,
         prompt: testPrompt.prompt,
         success: false,
-        error: error.message
+        error: errorMessage,
+        model,
+        timestamp: new Date().toISOString(),
+        workspaceDir: '',
+        workspaceId: '',
+        build: {
+          success: false,
+          duration: 0,
+          contentPreview: null,
+          error: errorMessage
+        }
       });
     }
   }
@@ -224,7 +308,8 @@ export async function runBenchmark(prompts, options = {}) {
         await stopApp(process);
         console.log(`   ✅ Stopped ${id}`);
       } catch (error) {
-        console.warn(`   ⚠️  Failed to stop ${id}: ${error.message}`);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.warn(`   ⚠️  Failed to stop ${id}: ${errorMessage}`);
       }
     }
   }
@@ -243,7 +328,8 @@ export async function runBenchmark(prompts, options = {}) {
           await workspace.delete();
           cleanedCount++;
         } catch (error) {
-          console.warn(`⚠️  Failed to delete workspace ${result.workspaceDir}: ${error.message}`);
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.warn(`⚠️  Failed to delete workspace ${result.workspaceDir}: ${errorMessage}`);
         }
       }
     }
@@ -254,7 +340,7 @@ export async function runBenchmark(prompts, options = {}) {
 
   // Save summary
   const summaryFile = path.join(resultsDir, `summary-${Date.now()}.json`);
-  const summary = {
+  const summary: BenchmarkSummary = {
     runner,
     model,
     timestamp: new Date().toISOString(),
@@ -276,10 +362,8 @@ export async function runBenchmark(prompts, options = {}) {
 
 /**
  * Step 4 - Compile the app
- * @param {string} workspacePath - Path to workspace
- * @returns {Promise<object>} Compilation results
  */
-async function compileApp(workspacePath) {
+async function compileApp(workspacePath: string): Promise<CompileResult> {
   console.log(`🔨 [4/6] Compiling app...`);
 
   const startTime = Date.now();
@@ -305,7 +389,7 @@ async function compileApp(workspacePath) {
         });
         const installDuration = Date.now() - installStart;
         console.log(`   ✅ Dependencies installed (${installDuration}ms)`);
-      } catch (installError) {
+      } catch (installError: any) {
         const installDuration = Date.now() - installStart;
         console.log(`   ❌ Install failed (${installDuration}ms)`);
         return {
@@ -339,11 +423,11 @@ async function compileApp(workspacePath) {
       duration: totalDuration,
       buildDuration,
       installNeeded,
-      stdout: stdout.substring(0, 500), // Truncate for storage
+      stdout: stdout.substring(0, 500),
       stderr: stderr.substring(0, 500)
     };
 
-  } catch (error) {
+  } catch (error: any) {
     const duration = Date.now() - startTime;
     console.log(`❌ [4/6] Compilation failed (${duration}ms)`);
 
@@ -359,17 +443,14 @@ async function compileApp(workspacePath) {
 
 /**
  * Step 5 - Run the app (using vite)
- * @param {string} workspacePath - Path to workspace
- * @returns {Promise<object>} Server info with URL and process handle
  */
-async function runApp(workspacePath) {
+async function runApp(workspacePath: string): Promise<RunResult> {
   console.log(`🚀 [5/6] Running app...`);
 
   const startTime = Date.now();
 
   return new Promise((resolve, reject) => {
     let output = '';
-    let serverUrl = null;
     let resolved = false;
 
     // Start vite dev server
@@ -383,27 +464,24 @@ async function runApp(workspacePath) {
         child.kill();
         reject(new Error('Server startup timeout (30s)'));
       }
-    }, 30000); // 30 second timeout
+    }, 30000);
 
-    child.stdout.on('data', (data) => {
+    child.stdout?.on('data', (data) => {
       const text = data.toString();
       output += text;
 
-      // Debug: log output chunks
       if (process.env.DEBUG) {
         console.log('[DEBUG]', text);
       }
 
       // Strip ANSI color codes for pattern matching
-      // eslint-disable-next-line no-control-regex
       const cleanText = text.replace(/\x1B\[[0-9;]*[mGKHF]/g, '');
 
-      // Look for Local URL pattern: "Local:   http://localhost:5173/"
       const localMatch = cleanText.match(/Local:\s+(http:\/\/localhost:\d+)/i);
       if (localMatch && !resolved) {
         resolved = true;
         clearTimeout(timeout);
-        serverUrl = localMatch[1];
+        const serverUrl = localMatch[1];
 
         const duration = Date.now() - startTime;
         console.log(`✅ [5/6] App running at ${serverUrl} (${duration}ms)`);
@@ -413,12 +491,12 @@ async function runApp(workspacePath) {
           serverUrl,
           process: child,
           duration,
-          output: output.substring(0, 1000) // Increase truncation limit for debugging
+          output: output.substring(0, 1000)
         });
       }
     });
 
-    child.stderr.on('data', (data) => {
+    child.stderr?.on('data', (data) => {
       output += data.toString();
     });
 
@@ -446,10 +524,8 @@ async function runApp(workspacePath) {
 
 /**
  * Stop a running vite dev server
- * @param {object} childProcess - Process handle from runApp
- * @returns {Promise<void>}
  */
-async function stopApp(childProcess) {
+async function stopApp(childProcess: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
     if (!childProcess || childProcess.killed) {
       resolve();
@@ -462,7 +538,6 @@ async function stopApp(childProcess) {
 
     childProcess.kill();
 
-    // Force kill after 5 seconds if not stopped
     setTimeout(() => {
       if (!childProcess.killed) {
         childProcess.kill('SIGKILL');
@@ -474,26 +549,24 @@ async function stopApp(childProcess) {
 
 /**
  * Step 6 - Analyze the app (using Playwright)
- * @param {string} serverUrl - URL of the running app
- * @param {string} testId - ID of the test (for screenshot filename)
- * @param {string} resultsDir - Directory to save screenshots
- * @returns {Promise<object>} Analysis results
  */
-async function analyzeApp(serverUrl, testId, resultsDir) {
+async function analyzeApp(
+  serverUrl: string,
+  testId: string,
+  resultsDir: string
+): Promise<AnalyzeResult> {
   console.log(`🔍 [6/6] Analyzing app...`);
 
   const startTime = Date.now();
-  const consoleMessages = [];
-  const consoleErrors = [];
-  const pageErrors = [];
+  const consoleMessages: Array<{ type: string; text: string }> = [];
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
 
   let browser;
   try {
-    // Launch browser
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
 
-    // Capture console messages
     page.on('console', msg => {
       const text = msg.text();
       consoleMessages.push({ type: msg.type(), text });
@@ -502,20 +575,16 @@ async function analyzeApp(serverUrl, testId, resultsDir) {
       }
     });
 
-    // Capture page errors
     page.on('pageerror', error => {
       pageErrors.push(error.message);
     });
 
-    // Navigate to page
     const navigationStart = Date.now();
     await page.goto(serverUrl, { waitUntil: 'networkidle', timeout: 30000 });
     const navigationDuration = Date.now() - navigationStart;
 
-    // Wait a bit for any dynamic content to load
     await page.waitForTimeout(1000);
 
-    // Take screenshot
     const screenshotsDir = path.join(resultsDir, 'screenshots');
     await fs.mkdir(screenshotsDir, { recursive: true });
 
@@ -525,10 +594,8 @@ async function analyzeApp(serverUrl, testId, resultsDir) {
       fullPage: true
     });
 
-    // Get page title
     const title = await page.title();
 
-    // Get basic page metrics
     const metrics = await page.evaluate(() => ({
       url: window.location.href,
       readyState: document.readyState,
@@ -550,7 +617,7 @@ async function analyzeApp(serverUrl, testId, resultsDir) {
       screenshotPath,
       title,
       metrics,
-      consoleMessages: consoleMessages.slice(0, 20), // Limit to first 20
+      consoleMessages: consoleMessages.slice(0, 20),
       consoleErrors,
       pageErrors,
       hasErrors: consoleErrors.length > 0 || pageErrors.length > 0
@@ -562,13 +629,14 @@ async function analyzeApp(serverUrl, testId, resultsDir) {
     }
 
     const duration = Date.now() - startTime;
+    const errorMessage = error instanceof Error ? error.message : String(error);
     console.log(`❌ [6/6] Analysis failed (${duration}ms)`);
-    console.log(`   Error: ${error.message}`);
+    console.log(`   Error: ${errorMessage}`);
 
     return {
       success: false,
       duration,
-      error: error.message,
+      error: errorMessage,
       consoleErrors,
       pageErrors
     };
@@ -581,12 +649,11 @@ async function analyzeApp(serverUrl, testId, resultsDir) {
 async function main() {
   const args = process.argv.slice(2);
 
-  // Parse flags
   const keepWorkspaces = args.includes('--keep-workspaces');
   const regularArgs = args.filter(arg => !arg.startsWith('--'));
 
   const model = regularArgs[0] || 'gpt-4o-mini';
-  const promptId = regularArgs[1]; // Optional: specific prompt ID to run
+  const promptId = regularArgs[1];
 
   if (!process.env.OPENAI_API_KEY) {
     console.error('❌ OPENAI_API_KEY environment variable is not set');
@@ -600,7 +667,6 @@ async function main() {
   console.log(`Total prompts: ${TEST_PROMPTS.length}`);
   console.log(`Keep workspaces: ${keepWorkspaces}\n`);
 
-  // Filter prompts if specific ID provided
   const promptsToRun = promptId
     ? TEST_PROMPTS.filter(p => p.id === promptId)
     : TEST_PROMPTS;
@@ -613,7 +679,6 @@ async function main() {
   try {
     const summary = await runBenchmark(promptsToRun, { model, keepWorkspaces });
 
-    // Print summary
     console.log('\n\n╔═══════════════════════════════════════════════════════╗');
     console.log('║                  Benchmark Summary                    ║');
     console.log('╚═══════════════════════════════════════════════════════╝\n');
@@ -642,7 +707,8 @@ async function main() {
     process.exit(summary.successCount === summary.totalPrompts ? 0 : 1);
 
   } catch (error) {
-    console.error('\n❌ Unexpected error:', error.message);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error('\n❌ Unexpected error:', errorMessage);
     process.exit(1);
   }
 }

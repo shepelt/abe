@@ -8,3 +8,4 @@ node_modules/
 settings-local.json
 results/
 package-lock.json
+dist/

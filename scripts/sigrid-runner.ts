@@ -4,6 +4,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import sigrid, { createWorkspace } from 'sigrid';
+import type { BenchmarkResult } from '../types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.join(__dirname, '..');
@@ -13,21 +14,37 @@ if (process.env.OPENAI_API_KEY) {
   sigrid.initializeClient(process.env.OPENAI_API_KEY);
 }
 
+interface Workspace {
+  path: string;
+  id: string;
+  populateWithTarball(tarballPath: string): Promise<void>;
+  execute(prompt: string, options: {
+    model: string;
+    instructions: string[];
+  }): Promise<{ content: string; conversationID: string }>;
+}
+
+interface BuildInternalResult {
+  success: boolean;
+  content?: string;
+  conversationID?: string;
+  duration: number;
+  error?: string;
+}
+
 /**
  * Step 1: Creates a temporary workspace
- * @returns {Promise<Workspace>} Workspace instance
  */
-async function createTempWorkspace() {
-  const workspace = await createWorkspace();
+async function createTempWorkspace(): Promise<Workspace> {
+  const workspace = await createWorkspace() as Workspace;
   console.log(`✅ [1/3] Workspace created: ${workspace.path}`);
   return workspace;
 }
 
 /**
  * Step 2: Populates workspace using test fixture tarball
- * @param {Workspace} workspace - Workspace instance
  */
-async function populateWorkspace(workspace) {
+async function populateWorkspace(workspace: Workspace): Promise<void> {
   // Use cached tarball if available (with pre-installed node_modules)
   const cachedTarballPath = path.join(PROJECT_ROOT, 'test-fixtures', 'react-scaffold-cached.tar.gz');
   const regularTarballPath = path.join(PROJECT_ROOT, 'test-fixtures', 'react-scaffold.tar.gz');
@@ -46,12 +63,12 @@ async function populateWorkspace(workspace) {
 
 /**
  * Step 3: Builds app using prompt given (via sigrid workspace.execute)
- * @param {Workspace} workspace - Workspace instance
- * @param {string} prompt - Prompt to execute
- * @param {string} model - Model to use (default: gpt-4o-mini)
- * @returns {Promise<object>} Execution results
  */
-async function buildAppWithPrompt(workspace, prompt, model = 'gpt-4o-mini') {
+async function buildAppWithPrompt(
+  workspace: Workspace,
+  prompt: string,
+  model: string = 'gpt-4o-mini'
+): Promise<BuildInternalResult> {
   console.log(`🤖 [3/3] Building app with sigrid...`);
   console.log(`   Model: ${model}`);
   console.log(`   Prompt: ${prompt}`);
@@ -61,7 +78,7 @@ async function buildAppWithPrompt(workspace, prompt, model = 'gpt-4o-mini') {
   try {
     // Load AI_RULES.md from scaffold
     const aiRulesPath = path.join(workspace.path, 'AI_RULES.md');
-    let aiRulesInstructions = [];
+    let aiRulesInstructions: string[] = [];
     try {
       const aiRules = await fs.readFile(aiRulesPath, 'utf-8');
       console.log(`   ✅ AI_RULES.md loaded from workspace`);
@@ -97,7 +114,7 @@ async function buildAppWithPrompt(workspace, prompt, model = 'gpt-4o-mini') {
 
     return {
       success: false,
-      error: error.message,
+      error: error instanceof Error ? error.message : String(error),
       duration
     };
   }
@@ -105,12 +122,13 @@ async function buildAppWithPrompt(workspace, prompt, model = 'gpt-4o-mini') {
 
 /**
  * Main benchmark function (exported for use as module)
- * @param {string} prompt - Prompt to execute
- * @param {string} model - Model to use (default: gpt-4o-mini)
- * @returns {Promise<object>} Benchmark results
+ * Implements the standard runner interface defined in types.ts
  */
-export async function runBenchmark(prompt, model = 'gpt-4o-mini') {
-  let workspace;
+export async function runBenchmark(
+  prompt: string,
+  model: string = 'gpt-4o-mini'
+): Promise<BenchmarkResult> {
+  let workspace: Workspace | undefined;
 
   try {
     // Step 1: Create workspace
@@ -123,7 +141,7 @@ export async function runBenchmark(prompt, model = 'gpt-4o-mini') {
     const buildResult = await buildAppWithPrompt(workspace, prompt, model);
 
     // Return results
-    const results = {
+    const results: BenchmarkResult = {
       prompt,
       model,
       timestamp: new Date().toISOString(),
@@ -132,7 +150,9 @@ export async function runBenchmark(prompt, model = 'gpt-4o-mini') {
       build: {
         success: buildResult.success,
         duration: buildResult.duration,
-        contentPreview: buildResult.content?.substring(0, 200) || null
+        contentPreview: buildResult.content?.substring(0, 200) || null,
+        conversationID: buildResult.conversationID,
+        error: buildResult.error
       }
     };
 
@@ -146,4 +166,3 @@ export async function runBenchmark(prompt, model = 'gpt-4o-mini') {
     throw error;
   }
 }
-
