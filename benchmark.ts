@@ -6,12 +6,61 @@ import { fileURLToPath } from 'url';
 import { exec, spawn, type ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import { chromium } from 'playwright';
+import { Command } from 'commander';
 import { runBenchmark as runSigridBenchmark } from './scripts/sigrid-runner.js';
+import { runBenchmark as runClaudeBenchmark } from './scripts/claude-runner.js';
 import { openWorkspace } from 'sigrid';
 import type { BenchmarkResult } from './types.js';
 
 const execAsync = promisify(exec);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Runner registry
+type RunnerFunction = (prompt: string, model?: string) => Promise<BenchmarkResult>;
+
+interface RunnerConfig {
+  id: string;
+  name: string;
+  defaultModel: string;
+  runBenchmark: RunnerFunction;
+  cleanupWorkspace?: (workspaceDir: string) => Promise<void>;
+}
+
+export const RUNNERS: Record<string, RunnerConfig> = {
+  sigrid: {
+    id: 'sigrid',
+    name: 'Sigrid (OpenAI)',
+    defaultModel: 'gpt-5',
+    runBenchmark: runSigridBenchmark,
+    cleanupWorkspace: async (workspaceDir: string) => {
+      const workspace = await openWorkspace(workspaceDir);
+      await workspace.delete();
+    }
+  },
+  claude: {
+    id: 'claude',
+    name: 'Claude Code CLI',
+    defaultModel: 'sonnet',
+    runBenchmark: runClaudeBenchmark,
+    cleanupWorkspace: async (workspaceDir: string) => {
+      await fs.rm(workspaceDir, { recursive: true, force: true });
+    }
+  }
+};
+
+/**
+ * Get list of available runner IDs
+ */
+export function getAvailableRunners(): string[] {
+  return Object.keys(RUNNERS);
+}
+
+/**
+ * Get runner config by ID
+ */
+export function getRunner(runnerId: string): RunnerConfig | undefined {
+  return RUNNERS[runnerId];
+}
 
 // Test prompt type
 export interface TestPrompt {
@@ -111,11 +160,20 @@ export async function runBenchmark(
   options: BenchmarkOptions = {}
 ): Promise<BenchmarkSummary> {
   const {
-    model = 'gpt-4o-mini',
-    runner = 'sigrid',
+    runner: runnerId = 'sigrid',
     resultsDir = path.join(__dirname, 'results'),
     keepWorkspaces = false
   } = options;
+
+  // Get runner config
+  const runnerConfig = RUNNERS[runnerId];
+  if (!runnerConfig) {
+    const availableRunners = Object.keys(RUNNERS).join(', ');
+    throw new Error(`Runner "${runnerId}" not found. Available runners: ${availableRunners}`);
+  }
+
+  // Use model from options or runner's default
+  const model = options.model || runnerConfig.defaultModel;
 
   // Normalize prompts to array format
   let promptsToRun: TestPrompt[] = [];
@@ -127,11 +185,6 @@ export async function runBenchmark(
     );
   } else {
     throw new Error('prompts must be a string or array of strings/objects');
-  }
-
-  // Only support sigrid runner for now
-  if (runner !== 'sigrid') {
-    throw new Error(`Runner "${runner}" not supported yet`);
   }
 
   const results: FullBenchmarkResult[] = [];
@@ -152,8 +205,8 @@ export async function runBenchmark(
     let serverProcess: ChildProcess | null = null;
 
     try {
-      // Step 1-3: Run benchmark (generate code with sigrid)
-      const benchmarkResult = await runSigridBenchmark(testPrompt.prompt, model);
+      // Step 1-3: Run benchmark (generate code)
+      const benchmarkResult = await runnerConfig.runBenchmark(testPrompt.prompt, model);
 
       if (!benchmarkResult.build.success) {
         console.log(`\n❌ ${testPrompt.id} - Code generation failed`);
@@ -318,14 +371,13 @@ export async function runBenchmark(
   const successCount = results.filter(r => r.success).length;
 
   // Clean up workspaces if requested
-  if (!keepWorkspaces) {
+  if (!keepWorkspaces && runnerConfig.cleanupWorkspace) {
     console.log('\n🧹 Cleaning up workspaces...');
     let cleanedCount = 0;
     for (const result of results) {
       if (result.workspaceDir) {
         try {
-          const workspace = await openWorkspace(result.workspaceDir);
-          await workspace.delete();
+          await runnerConfig.cleanupWorkspace(result.workspaceDir);
           cleanedCount++;
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
@@ -341,7 +393,7 @@ export async function runBenchmark(
   // Save summary
   const summaryFile = path.join(resultsDir, `summary-${Date.now()}.json`);
   const summary: BenchmarkSummary = {
-    runner,
+    runner: runnerId,
     model,
     timestamp: new Date().toISOString(),
     totalDuration,
@@ -647,37 +699,97 @@ async function analyzeApp(
  * CLI entry point
  */
 async function main() {
-  const args = process.argv.slice(2);
+  const program = new Command();
 
-  const keepWorkspaces = args.includes('--keep-workspaces');
-  const regularArgs = args.filter(arg => !arg.startsWith('--'));
+  program
+    .name('abe')
+    .description('ABE - App Builder Benchmark Environment')
+    .version('1.0.0')
+    .option('-r, --runner <id>', 'Runner to use (sigrid, claude)', 'sigrid')
+    .option('-m, --model <name>', 'Model name (uses runner\'s default if not specified)')
+    .option('-p, --prompt <text>', 'Custom prompt text (overrides promptId)')
+    .option('-k, --keep-workspaces', 'Keep workspaces after completion', false)
+    .option('-l, --list-prompts', 'List all built-in test prompts and exit')
+    .argument('[promptId]', 'Built-in prompt ID to run (runs all if not specified)')
+    .addHelpText('after', `
+Available Runners:
+  ${Object.values(RUNNERS).map(r => `${r.id.padEnd(10)} - ${r.name} (default: ${r.defaultModel})`).join('\n  ')}
 
-  const model = regularArgs[0] || 'gpt-4o-mini';
-  const promptId = regularArgs[1];
+Built-in Test Prompts:
+  ${TEST_PROMPTS.map(p => `${p.id.padEnd(12)} - ${p.prompt}`).join('\n  ')}
 
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('❌ OPENAI_API_KEY environment variable is not set');
+Examples:
+  $ npm run benchmark                                    # Run all built-in prompts
+  $ npm run benchmark -- --list-prompts                  # List all built-in prompts
+  $ npm run benchmark -- counter                         # Run specific built-in prompt
+  $ npm run benchmark -- --runner claude todo-app        # Run with specific runner
+  $ npm run benchmark -- --prompt "build a calculator"   # Run custom prompt
+  $ npm run benchmark -- -r claude -p "make a timer"     # Custom prompt with runner
+  $ npm run benchmark -- --model gpt-4o counter          # Run with specific model
+    `);
+
+  program.parse();
+
+  const options = program.opts();
+  const [promptId] = program.args;
+
+  // Handle --list-prompts flag
+  if (options.listPrompts) {
+    console.log('╔═══════════════════════════════════════════════════════╗');
+    console.log('║          Built-in Test Prompts                        ║');
+    console.log('╚═══════════════════════════════════════════════════════╝\n');
+    TEST_PROMPTS.forEach(p => {
+      console.log(`${p.id.padEnd(12)} - ${p.prompt}`);
+    });
+    console.log(`\nTotal: ${TEST_PROMPTS.length} prompts`);
+    process.exit(0);
+  }
+
+  const runnerId = options.runner;
+  const keepWorkspaces = options.keepWorkspaces;
+  const customPrompt = options.prompt;
+
+  // Get runner config
+  const runnerConfig = RUNNERS[runnerId];
+  if (!runnerConfig) {
+    const availableRunners = Object.keys(RUNNERS).join(', ');
+    console.error(`❌ Runner "${runnerId}" not found. Available runners: ${availableRunners}`);
     process.exit(1);
+  }
+
+  // Use model from options or runner's default
+  const model = options.model || runnerConfig.defaultModel;
+
+  // Determine which prompts to run
+  let promptsToRun: TestPrompt[];
+
+  if (customPrompt) {
+    // Custom prompt provided via --prompt flag
+    promptsToRun = [{ id: 'custom', prompt: customPrompt }];
+  } else if (promptId) {
+    // Specific built-in prompt ID provided
+    promptsToRun = TEST_PROMPTS.filter(p => p.id === promptId);
+    if (promptsToRun.length === 0) {
+      console.error(`❌ Prompt ID "${promptId}" not found`);
+      console.error(`Available prompt IDs: ${TEST_PROMPTS.map(p => p.id).join(', ')}`);
+      console.error(`\nUse --list-prompts to see all available prompts`);
+      process.exit(1);
+    }
+  } else {
+    // No prompt specified - run all built-in prompts
+    promptsToRun = TEST_PROMPTS;
   }
 
   console.log('╔═══════════════════════════════════════════════════════╗');
   console.log('║     ABE - App Builder Benchmark Environment          ║');
   console.log('╚═══════════════════════════════════════════════════════╝');
-  console.log(`\nModel: ${model}`);
-  console.log(`Total prompts: ${TEST_PROMPTS.length}`);
+  console.log(`\nRunner: ${runnerConfig.name}`);
+  console.log(`Model: ${model}`);
+  console.log(`Total prompts: ${promptsToRun.length}`);
   console.log(`Keep workspaces: ${keepWorkspaces}\n`);
 
-  const promptsToRun = promptId
-    ? TEST_PROMPTS.filter(p => p.id === promptId)
-    : TEST_PROMPTS;
-
-  if (promptsToRun.length === 0) {
-    console.error(`❌ Prompt ID "${promptId}" not found`);
-    process.exit(1);
-  }
-
   try {
-    const summary = await runBenchmark(promptsToRun, { model, keepWorkspaces });
+    const summary = await runBenchmark(promptsToRun, { runner: runnerId, model, keepWorkspaces });
 
     console.log('\n\n╔═══════════════════════════════════════════════════════╗');
     console.log('║                  Benchmark Summary                    ║');
