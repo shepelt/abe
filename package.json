@@ -1,0 +1,20 @@
+{
+  "name": "abe",
+  "version": "1.0.0",
+  "description": "App Builder Benchmark Environment - LLM-based React app generation evaluation framework",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "sigrid": "git+https://github.com/shepelt/sigrid.git",
+    "tar": "^7.5.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}
