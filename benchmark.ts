@@ -272,8 +272,7 @@ async function copyScreenshot(
   runnerId: string,
   dateStr: string
 ): Promise<string> {
-  const dateOnly = dateStr.split('-')[0]; // YYYYMMDD
-  const filename = `${runnerId}_${dateOnly}.png`;
+  const filename = `${runnerId}_${dateStr}.png`;
   const destPath = path.join(benchmarkDir, filename);
   await fs.copyFile(sourcePath, destPath);
   return filename;
@@ -471,17 +470,18 @@ export async function runMultiRunnerBenchmark(
 
   // Create timestamped benchmark directory
   const now = new Date();
-  const dateStr = now.toISOString()
-    .replace(/T/, '-')
-    .replace(/:/g, '')
-    .replace(/\..+/, '')
-    .replace(/-/g, (match, offset) => offset < 8 ? match : '');
-  const dateOnly = dateStr.substring(0, 8); // YYYYMMDD
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  const dateStr = `${year}${month}${day}-${hours}${minutes}${seconds}`; // YYYYMMDD-HHMMSS
 
   const benchmarkDir = path.join(
     __dirname,
     'benchmarks',
-    dateStr.substring(0, 15), // YYYYMMDD-HHMMSS
+    dateStr,
     appName
   );
 
@@ -610,7 +610,7 @@ export async function runMultiRunnerBenchmark(
 
   results.forEach(r => {
     if (r.screenshotPath) {
-      console.log(`   ✅ ${r.runner}_${dateOnly}.png`);
+      console.log(`   ✅ ${r.runner}_${dateStr}.png`);
     }
   });
 
