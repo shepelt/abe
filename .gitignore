@@ -7,5 +7,6 @@ node_modules/
 .env.local
 settings-local.json
 results/
+benchmarks/
 package-lock.json
 dist/

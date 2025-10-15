@@ -68,21 +68,96 @@ export interface TestPrompt {
   prompt: string;
 }
 
-// Embedded test prompts
-export const TEST_PROMPTS: TestPrompt[] = [
-  {
-    id: 'todo-app',
-    prompt: 'Build a simple todo app with add, complete, and delete functionality'
-  },
-  {
-    id: 'counter',
-    prompt: 'Create a counter app with increment, decrement, and reset buttons'
-  },
-  {
-    id: 'color-picker',
-    prompt: 'Build a color picker that shows RGB values and a preview square'
+/**
+ * Parse and validate runner filter
+ */
+function parseRunnerFilter(filter: string, allRunners: string[]): string[] {
+  if (!filter) {
+    return allRunners;
   }
-];
+
+  const requested = filter.split(',').map(r => r.trim());
+  const invalid = requested.filter(r => !allRunners.includes(r));
+
+  if (invalid.length > 0) {
+    throw new Error(
+      `Invalid runner(s): ${invalid.join(', ')}. ` +
+      `Available runners: ${allRunners.join(', ')}`
+    );
+  }
+
+  return requested;
+}
+
+/**
+ * Load a prompt from a file
+ */
+async function loadPromptFromFile(filePath: string): Promise<string> {
+  const content = await fs.readFile(filePath, 'utf-8');
+  return content.trim();
+}
+
+/**
+ * Load all built-in prompts from prompts/ directory
+ */
+async function loadAllPrompts(): Promise<TestPrompt[]> {
+  const promptsDir = path.join(__dirname, 'prompts');
+
+  try {
+    const files = await fs.readdir(promptsDir);
+    const txtFiles = files.filter(f => f.endsWith('.txt'));
+
+    const prompts: TestPrompt[] = [];
+    for (const file of txtFiles) {
+      const id = file.replace('.txt', '');
+      const filePath = path.join(promptsDir, file);
+      const prompt = await loadPromptFromFile(filePath);
+      prompts.push({ id, prompt });
+    }
+
+    return prompts.sort((a, b) => a.id.localeCompare(b.id));
+  } catch (error) {
+    // If prompts directory doesn't exist, return empty array
+    console.warn(`Warning: Could not load prompts from ${promptsDir}`);
+    return [];
+  }
+}
+
+/**
+ * Resolve prompt input to a TestPrompt object
+ * Can handle:
+ * - Built-in prompt ID (e.g., 'todo-app')
+ * - File path (e.g., 'prompts/todo-app.txt' or '../my-prompt.txt')
+ * - Direct prompt string (e.g., 'Build a calculator app')
+ */
+async function resolvePrompt(input: string): Promise<TestPrompt> {
+  // Check if input looks like a file path
+  const isFilePath = input.includes('/') || input.includes('\\') || input.endsWith('.txt');
+
+  if (isFilePath) {
+    // Try to load from file
+    try {
+      const prompt = await loadPromptFromFile(input);
+      const id = path.basename(input, '.txt');
+      return { id, prompt };
+    } catch (error) {
+      throw new Error(`Failed to load prompt from file "${input}": ${(error as Error).message}`);
+    }
+  }
+
+  // Check if it's a built-in prompt ID
+  const promptsDir = path.join(__dirname, 'prompts');
+  const builtInPath = path.join(promptsDir, `${input}.txt`);
+
+  try {
+    await fs.access(builtInPath);
+    const prompt = await loadPromptFromFile(builtInPath);
+    return { id: input, prompt };
+  } catch {
+    // Not a built-in prompt ID, treat as direct prompt string
+    return { id: 'custom', prompt: input };
+  }
+}
 
 // Extended benchmark result with all pipeline steps
 export interface FullBenchmarkResult extends BenchmarkResult {
@@ -152,8 +227,400 @@ export interface BenchmarkSummary {
   summaryFile?: string;
 }
 
+// New interfaces for multi-runner benchmark
+export interface RunnerBenchmarkResult {
+  runner: string;
+  model: string;
+  success: boolean;
+  totalDuration: number;
+  durations: {
+    codeGeneration: number;
+    compilation: number;
+    serverStartup: number;
+    analysis: number;
+  };
+  errors: {
+    consoleErrors: number;
+    pageErrors: number;
+  };
+  screenshotPath?: string;
+  workspaceDir?: string;
+  error?: string;
+}
+
+export interface BenchmarkMetadata {
+  appName: string;
+  timestamp: string;
+  dateStr: string;
+  prompt: string;
+  runners: RunnerBenchmarkResult[];
+  summary: {
+    totalRunners: number;
+    successfulRunners: number;
+    failedRunners: number;
+    fastestRunner: string | null;
+    fastestTime: number | null;
+  };
+}
+
 /**
- * Run benchmarks for given prompts
+ * Copy screenshot to benchmark directory
+ */
+async function copyScreenshot(
+  sourcePath: string,
+  benchmarkDir: string,
+  runnerId: string,
+  dateStr: string
+): Promise<string> {
+  const dateOnly = dateStr.split('-')[0]; // YYYYMMDD
+  const filename = `${runnerId}_${dateOnly}.png`;
+  const destPath = path.join(benchmarkDir, filename);
+  await fs.copyFile(sourcePath, destPath);
+  return filename;
+}
+
+/**
+ * Run a single runner through the full benchmark pipeline
+ */
+async function runSingleRunner(
+  runnerId: string,
+  prompt: string,
+  keepWorkspaces: boolean
+): Promise<RunnerBenchmarkResult> {
+  const runnerConfig = RUNNERS[runnerId];
+  const model = runnerConfig.defaultModel;
+
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`Running: ${runnerConfig.name} (${model})`);
+  console.log(`Prompt: "${prompt}"`);
+  console.log('='.repeat(60));
+
+  const startTime = Date.now();
+  let serverProcess: ChildProcess | null = null;
+
+  try {
+    // 1. Code generation
+    const buildResult = await runnerConfig.runBenchmark(prompt, model);
+
+    if (!buildResult.build.success) {
+      return {
+        runner: runnerId,
+        model,
+        success: false,
+        error: 'Code generation failed',
+        totalDuration: Date.now() - startTime,
+        durations: {
+          codeGeneration: buildResult.build.duration,
+          compilation: 0,
+          serverStartup: 0,
+          analysis: 0
+        },
+        errors: {
+          consoleErrors: 0,
+          pageErrors: 0
+        }
+      };
+    }
+
+    console.log(`✅ Code generated (${buildResult.build.duration}ms)`);
+
+    // 2. Compile
+    const compileResult = await compileApp(buildResult.workspaceDir);
+
+    if (!compileResult.success) {
+      return {
+        runner: runnerId,
+        model,
+        success: false,
+        error: 'Compilation failed',
+        totalDuration: Date.now() - startTime,
+        durations: {
+          codeGeneration: buildResult.build.duration,
+          compilation: compileResult.duration,
+          serverStartup: 0,
+          analysis: 0
+        },
+        errors: {
+          consoleErrors: 0,
+          pageErrors: 0
+        },
+        workspaceDir: buildResult.workspaceDir
+      };
+    }
+
+    console.log(`✅ Compiled (${compileResult.duration}ms)`);
+
+    // 3. Run server
+    const runResult = await runApp(buildResult.workspaceDir);
+    serverProcess = runResult.process || null;
+
+    if (!runResult.success) {
+      return {
+        runner: runnerId,
+        model,
+        success: false,
+        error: 'Server startup failed',
+        totalDuration: Date.now() - startTime,
+        durations: {
+          codeGeneration: buildResult.build.duration,
+          compilation: compileResult.duration,
+          serverStartup: runResult.duration,
+          analysis: 0
+        },
+        errors: {
+          consoleErrors: 0,
+          pageErrors: 0
+        },
+        workspaceDir: buildResult.workspaceDir
+      };
+    }
+
+    console.log(`✅ Server started (${runResult.duration}ms)`);
+
+    // 4. Analyze app
+    const resultsDir = path.join(__dirname, 'results');
+    const analyzeResult = await analyzeApp(
+      runResult.serverUrl!,
+      `${runnerId}-temp`,
+      resultsDir
+    );
+
+    console.log(`✅ Analysis complete (${analyzeResult.duration}ms)`);
+
+    // 5. Stop server
+    if (serverProcess) {
+      await stopApp(serverProcess);
+    }
+
+    const totalDuration = Date.now() - startTime;
+    console.log(`✅ Total: ${(totalDuration / 1000).toFixed(1)}s`);
+
+    const result: RunnerBenchmarkResult = {
+      runner: runnerId,
+      model,
+      success: true,
+      totalDuration,
+      durations: {
+        codeGeneration: buildResult.build.duration,
+        compilation: compileResult.duration,
+        serverStartup: runResult.duration,
+        analysis: analyzeResult.duration
+      },
+      errors: {
+        consoleErrors: analyzeResult.consoleErrors?.length || 0,
+        pageErrors: analyzeResult.pageErrors?.length || 0
+      },
+      screenshotPath: analyzeResult.screenshotPath,
+      workspaceDir: buildResult.workspaceDir
+    };
+
+    // 6. Cleanup workspace if requested
+    if (!keepWorkspaces && runnerConfig.cleanupWorkspace && buildResult.workspaceDir) {
+      await runnerConfig.cleanupWorkspace(buildResult.workspaceDir);
+    }
+
+    return result;
+
+  } catch (error) {
+    // Cleanup server if running
+    if (serverProcess) {
+      try {
+        await stopApp(serverProcess);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+
+    return {
+      runner: runnerId,
+      model,
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+      totalDuration: Date.now() - startTime,
+      durations: {
+        codeGeneration: 0,
+        compilation: 0,
+        serverStartup: 0,
+        analysis: 0
+      },
+      errors: {
+        consoleErrors: 0,
+        pageErrors: 0
+      }
+    };
+  }
+}
+
+/**
+ * Run multi-runner benchmark for a single app/prompt
+ * Saves results to benchmarks/YYYYMMDD-HHmmss/app-name/
+ */
+export async function runMultiRunnerBenchmark(
+  appName: string,
+  prompt: string,
+  options: {
+    filter?: string;
+    keepWorkspaces?: boolean;
+  } = {}
+): Promise<{ benchmarkDir: string; metadata: BenchmarkMetadata }> {
+  const { filter, keepWorkspaces = false } = options;
+
+  // Parse runners to use
+  const allRunners = Object.keys(RUNNERS);
+  const runnersToRun = parseRunnerFilter(filter || '', allRunners);
+
+  // Create timestamped benchmark directory
+  const now = new Date();
+  const dateStr = now.toISOString()
+    .replace(/T/, '-')
+    .replace(/:/g, '')
+    .replace(/\..+/, '')
+    .replace(/-/g, (match, offset) => offset < 8 ? match : '');
+  const dateOnly = dateStr.substring(0, 8); // YYYYMMDD
+
+  const benchmarkDir = path.join(
+    __dirname,
+    'benchmarks',
+    dateStr.substring(0, 15), // YYYYMMDD-HHMMSS
+    appName
+  );
+
+  await fs.mkdir(benchmarkDir, { recursive: true });
+
+  console.log('╔═══════════════════════════════════════════════════════╗');
+  console.log('║     ABE - App Builder Benchmark Environment          ║');
+  console.log('╚═══════════════════════════════════════════════════════╝');
+  console.log(`\nApp: ${appName}`);
+  console.log(`Prompt: "${prompt}"`);
+  console.log(`Runners: ${runnersToRun.join(', ')} (${runnersToRun.length} total)\n`);
+
+  const results: RunnerBenchmarkResult[] = [];
+
+  // Run each runner
+  for (let i = 0; i < runnersToRun.length; i++) {
+    const runnerId = runnersToRun[i];
+
+    console.log(`\n[${ i + 1}/${runnersToRun.length}] Running: ${RUNNERS[runnerId].name}`);
+    console.log('='.repeat(60));
+
+    try {
+      const result = await runSingleRunner(runnerId, prompt, keepWorkspaces);
+      results.push(result);
+
+      // Copy screenshot if successful
+      if (result.success && result.screenshotPath) {
+        try {
+          const filename = await copyScreenshot(
+            result.screenshotPath,
+            benchmarkDir,
+            runnerId,
+            dateStr
+          );
+          console.log(`📸 Screenshot saved: ${filename}`);
+        } catch (error) {
+          console.warn(`⚠️  Failed to copy screenshot: ${(error as Error).message}`);
+        }
+      }
+    } catch (error) {
+      console.error(`❌ Runner ${runnerId} failed: ${(error as Error).message}`);
+      results.push({
+        runner: runnerId,
+        model: RUNNERS[runnerId].defaultModel,
+        success: false,
+        error: (error as Error).message,
+        totalDuration: 0,
+        durations: {
+          codeGeneration: 0,
+          compilation: 0,
+          serverStartup: 0,
+          analysis: 0
+        },
+        errors: {
+          consoleErrors: 0,
+          pageErrors: 0
+        }
+      });
+    }
+  }
+
+  // Generate summary
+  const successfulRunners = results.filter(r => r.success);
+  const failedRunners = results.filter(r => !r.success);
+
+  let fastestRunner: string | null = null;
+  let fastestTime: number | null = null;
+
+  if (successfulRunners.length > 0) {
+    const fastest = successfulRunners.reduce((min, r) =>
+      r.totalDuration < min.totalDuration ? r : min
+    );
+    fastestRunner = fastest.runner;
+    fastestTime = fastest.totalDuration;
+  }
+
+  // Create metadata
+  const metadata: BenchmarkMetadata = {
+    appName,
+    timestamp: now.toISOString(),
+    dateStr,
+    prompt,
+    runners: results.map(r => ({
+      ...r,
+      screenshotPath: r.screenshotPath ? path.basename(r.screenshotPath!) : undefined
+    })),
+    summary: {
+      totalRunners: results.length,
+      successfulRunners: successfulRunners.length,
+      failedRunners: failedRunners.length,
+      fastestRunner,
+      fastestTime
+    }
+  };
+
+  // Save metadata
+  const metadataPath = path.join(benchmarkDir, 'metadata.json');
+  await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2));
+
+  // Print summary
+  console.log('\n\n╔═══════════════════════════════════════════════════════╗');
+  console.log('║            Benchmark Results                          ║');
+  console.log('╚═══════════════════════════════════════════════════════╝\n');
+
+  console.log('┌─────────┬─────────┬──────────┬──────────┬─────────┐');
+  console.log('│ Runner  │ Model   │ Total    │ Success  │ Errors  │');
+  console.log('├─────────┼─────────┼──────────┼──────────┼─────────┤');
+
+  results.forEach(r => {
+    const runner = r.runner.padEnd(7);
+    const model = r.model.padEnd(7);
+    const total = r.success ? `${(r.totalDuration / 1000).toFixed(1)}s`.padEnd(8) : 'FAILED'.padEnd(8);
+    const success = r.success ? '✅' : '❌';
+    const errors = `${r.errors.consoleErrors + r.errors.pageErrors}`.padEnd(7);
+    console.log(`│ ${runner} │ ${model} │ ${total} │ ${success}       │ ${errors} │`);
+  });
+
+  console.log('└─────────┴─────────┴──────────┴──────────┴─────────┘\n');
+
+  if (fastestRunner) {
+    console.log(`🏆 Fastest: ${fastestRunner} (${(fastestTime! / 1000).toFixed(1)}s)`);
+  }
+
+  console.log(`📊 Success rate: ${successfulRunners.length}/${results.length} (${Math.round(successfulRunners.length / results.length * 100)}%)\n`);
+  console.log(`📦 Benchmark saved: ${benchmarkDir}/`);
+
+  results.forEach(r => {
+    if (r.screenshotPath) {
+      console.log(`   ✅ ${r.runner}_${dateOnly}.png`);
+    }
+  });
+
+  console.log(`   ✅ metadata.json`);
+
+  return { benchmarkDir, metadata };
+}
+
+/**
+ * Run benchmarks for given prompts (legacy function)
  */
 export async function runBenchmark(
   prompts: TestPrompt[] | string,
@@ -705,118 +1172,99 @@ async function main() {
     .name('abe')
     .description('ABE - App Builder Benchmark Environment')
     .version('1.0.0')
-    .option('-r, --runner <id>', 'Runner to use (sigrid, claude)', 'sigrid')
-    .option('-m, --model <name>', 'Model name (uses runner\'s default if not specified)')
-    .option('-p, --prompt <text>', 'Custom prompt text (overrides promptId)')
+    .argument('<app-name>', 'App name (must match a built-in prompt ID or provide custom prompt)')
+    .option('-f, --filter <runners>', 'Filter specific runners (comma-separated)', '')
+    .option('-p, --prompt <text>', 'Custom prompt text (overrides built-in prompt)', '')
     .option('-k, --keep-workspaces', 'Keep workspaces after completion', false)
     .option('-l, --list-prompts', 'List all built-in test prompts and exit')
-    .argument('[promptId]', 'Built-in prompt ID to run (runs all if not specified)')
     .addHelpText('after', `
 Available Runners:
   ${Object.values(RUNNERS).map(r => `${r.id.padEnd(10)} - ${r.name} (default: ${r.defaultModel})`).join('\n  ')}
 
-Built-in Test Prompts:
-  ${TEST_PROMPTS.map(p => `${p.id.padEnd(12)} - ${p.prompt}`).join('\n  ')}
+Prompt Input Options:
+  Built-in prompts are loaded from the prompts/ directory.
+  You can provide prompts in three ways:
+    1. Built-in prompt ID (e.g., 'todo-app', 'counter')
+    2. File path (e.g., 'prompts/todo-app.txt', '../my-prompt.txt')
+    3. Custom string with --prompt flag
 
 Examples:
-  $ npm run benchmark                                    # Run all built-in prompts
+  $ npm run benchmark todo-app                           # Run all runners with built-in prompt
   $ npm run benchmark -- --list-prompts                  # List all built-in prompts
-  $ npm run benchmark -- counter                         # Run specific built-in prompt
-  $ npm run benchmark -- --runner claude todo-app        # Run with specific runner
-  $ npm run benchmark -- --prompt "build a calculator"   # Run custom prompt
-  $ npm run benchmark -- -r claude -p "make a timer"     # Custom prompt with runner
-  $ npm run benchmark -- --model gpt-4o counter          # Run with specific model
+  $ npm run benchmark todo-app -- --filter sigrid        # Run only sigrid runner
+  $ npm run benchmark todo-app -- --filter sigrid,claude # Run multiple runners
+  $ npm run benchmark prompts/todo-app.txt               # Run from file path
+  $ npm run benchmark my-app -- --prompt "build a calc"  # Run with custom prompt
+  $ npm run benchmark todo-app -- --keep-workspaces      # Keep workspaces after run
     `);
+
+  // Handle --list-prompts flag before parsing
+  if (process.argv.includes('--list-prompts') || process.argv.includes('-l')) {
+    const allPrompts = await loadAllPrompts();
+    console.log('╔═══════════════════════════════════════════════════════╗');
+    console.log('║          Built-in Test Prompts                        ║');
+    console.log('╚═══════════════════════════════════════════════════════╝\n');
+    allPrompts.forEach(p => {
+      console.log(`${p.id.padEnd(12)} - ${p.prompt}`);
+    });
+    console.log(`\nTotal: ${allPrompts.length} prompts`);
+    console.log(`\nPrompts are loaded from: prompts/`);
+    process.exit(0);
+  }
 
   program.parse();
 
   const options = program.opts();
-  const [promptId] = program.args;
+  const [appName] = program.args;
 
-  // Handle --list-prompts flag
-  if (options.listPrompts) {
-    console.log('╔═══════════════════════════════════════════════════════╗');
-    console.log('║          Built-in Test Prompts                        ║');
-    console.log('╚═══════════════════════════════════════════════════════╝\n');
-    TEST_PROMPTS.forEach(p => {
-      console.log(`${p.id.padEnd(12)} - ${p.prompt}`);
-    });
-    console.log(`\nTotal: ${TEST_PROMPTS.length} prompts`);
-    process.exit(0);
-  }
-
-  const runnerId = options.runner;
+  const filter = options.filter;
   const keepWorkspaces = options.keepWorkspaces;
   const customPrompt = options.prompt;
 
-  // Get runner config
-  const runnerConfig = RUNNERS[runnerId];
-  if (!runnerConfig) {
-    const availableRunners = Object.keys(RUNNERS).join(', ');
-    console.error(`❌ Runner "${runnerId}" not found. Available runners: ${availableRunners}`);
-    process.exit(1);
+  // Validate runner filter if provided
+  if (filter) {
+    try {
+      parseRunnerFilter(filter, Object.keys(RUNNERS));
+    } catch (error) {
+      console.error(`❌ ${(error as Error).message}`);
+      process.exit(1);
+    }
   }
 
-  // Use model from options or runner's default
-  const model = options.model || runnerConfig.defaultModel;
-
-  // Determine which prompts to run
-  let promptsToRun: TestPrompt[];
+  // Resolve prompt
+  let prompt: string;
+  let resolvedAppName: string = appName;
 
   if (customPrompt) {
     // Custom prompt provided via --prompt flag
-    promptsToRun = [{ id: 'custom', prompt: customPrompt }];
-  } else if (promptId) {
-    // Specific built-in prompt ID provided
-    promptsToRun = TEST_PROMPTS.filter(p => p.id === promptId);
-    if (promptsToRun.length === 0) {
-      console.error(`❌ Prompt ID "${promptId}" not found`);
-      console.error(`Available prompt IDs: ${TEST_PROMPTS.map(p => p.id).join(', ')}`);
+    prompt = customPrompt;
+  } else {
+    // Try to resolve appName as prompt ID or file path
+    try {
+      const resolved = await resolvePrompt(appName);
+      prompt = resolved.prompt;
+      resolvedAppName = resolved.id;
+    } catch (error) {
+      const allPrompts = await loadAllPrompts();
+      console.error(`❌ App/Prompt "${appName}" not found`);
+      console.error(`Available prompt IDs: ${allPrompts.map(p => p.id).join(', ')}`);
       console.error(`\nUse --list-prompts to see all available prompts`);
+      console.error(`Or provide a file path (e.g., prompts/todo-app.txt)`);
+      console.error(`Or use --prompt to provide a custom prompt string`);
       process.exit(1);
     }
-  } else {
-    // No prompt specified - run all built-in prompts
-    promptsToRun = TEST_PROMPTS;
   }
 
-  console.log('╔═══════════════════════════════════════════════════════╗');
-  console.log('║     ABE - App Builder Benchmark Environment          ║');
-  console.log('╚═══════════════════════════════════════════════════════╝');
-  console.log(`\nRunner: ${runnerConfig.name}`);
-  console.log(`Model: ${model}`);
-  console.log(`Total prompts: ${promptsToRun.length}`);
-  console.log(`Keep workspaces: ${keepWorkspaces}\n`);
-
   try {
-    const summary = await runBenchmark(promptsToRun, { runner: runnerId, model, keepWorkspaces });
+    const { benchmarkDir, metadata } = await runMultiRunnerBenchmark(
+      resolvedAppName,
+      prompt,
+      { filter, keepWorkspaces }
+    );
 
-    console.log('\n\n╔═══════════════════════════════════════════════════════╗');
-    console.log('║                  Benchmark Summary                    ║');
-    console.log('╚═══════════════════════════════════════════════════════╝\n');
-
-    console.log(`Total: ${summary.totalPrompts}`);
-    console.log(`Success: ${summary.successCount}`);
-    console.log(`Failed: ${summary.failureCount}`);
-    console.log(`Duration: ${summary.totalDuration}ms\n`);
-
-    summary.results.forEach(result => {
-      const status = result.success ? '✅' : '❌';
-      console.log(`${status} ${result.id}`);
-    });
-
-    console.log(`\n💾 Summary saved: ${summary.summaryFile}`);
-
-    if (keepWorkspaces && summary.results.length > 0) {
-      console.log('\n📁 Workspaces:');
-      summary.results.forEach(result => {
-        if (result.workspaceDir) {
-          console.log(`   ${result.id}: ${result.workspaceDir}`);
-        }
-      });
-    }
-
-    process.exit(summary.successCount === summary.totalPrompts ? 0 : 1);
+    // Exit with error code if any runner failed
+    const hasFailures = metadata.summary.failedRunners > 0;
+    process.exit(hasFailures ? 1 : 0);
 
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

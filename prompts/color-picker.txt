@@ -1,0 +1,1 @@
+Build a color picker that shows RGB values and a preview square
