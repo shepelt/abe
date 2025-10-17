@@ -79,6 +79,29 @@ Keep it simple and flat initially:
   - Wait for user approval before applying
   - Exception: Only when user explicitly requests the change (e.g., "fix that", "do it")
 
+## Quality Analysis (Meta-Analysis)
+- Use `ANALYSIS_TEMPLATE.md` for running meta-analysis on benchmark results
+- Meta-analysis workflow:
+  1. Run benchmark: `npm run benchmark [app-name]`
+  2. Request analysis: "ANALYSIS_TEMPLATE.md 참고해서 [app-name] 분석해줘"
+  3. Claude Code will use Vision API to compare screenshots
+  4. Results saved to: `analysis/[timestamp]_[app-name]/analysis.html`
+- Analysis provides:
+  - Embedded screenshots for visual comparison
+  - Relative ranking of implementations (Base44, Dyad, Sigrid, Claude)
+  - Feature completeness matrix
+  - Gap analysis and recommendations
+  - Actionable next steps for improvement
+- This is a meta-analysis: LLM evaluating LLM outputs
+  - Focus on relative comparison, not absolute scores
+  - Be specific about differences, not vague qualities
+  - Use findings to improve prompts and strategies
+- HTML format benefits:
+  - Self-contained single file with embedded screenshots
+  - Professional styling with color-coded rankings
+  - Visual score bars and comparison tables
+  - Easy to share and open in any browser
+
 ## Quality Metrics to Consider
 - **Functional**: Build success, runtime errors, intent match
 - **Code Quality**: ESLint errors, complexity, duplication

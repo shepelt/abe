@@ -1,0 +1,12 @@
+Build an expense tracker app:
+
+Features:
+- Add expense with: amount, category (dropdown), description, date
+- Display expenses in a list
+- Show total expenses at the top
+- Filter by category
+- Delete expenses
+
+Categories: Food, Transport, Shopping, Entertainment, Other
+
+Design: Use shadcn/ui Card and Select components, show total in a Badge

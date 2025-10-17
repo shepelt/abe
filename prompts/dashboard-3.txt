@@ -1,0 +1,24 @@
+Build an analytics dashboard:
+
+Features:
+- Top row: 4 stat cards (Total Users: 1,234, Revenue: $56.7k, Growth: +12%, Active: 89%)
+- Chart section: Simple bar chart showing monthly data (use divs as bars, not library)
+- Recent activity list: 5 items with timestamp and action
+- Filter dropdown: Last 7 days, Last 30 days, All time (just UI, data doesn't change)
+
+Sample data (hardcoded):
+Stats: see above
+Monthly data: Jan: 45, Feb: 52, Mar: 68, Apr: 71, May: 89
+Activities:
+- "User John signed up" (2 mins ago)
+- "Payment received $299" (1 hour ago)
+- "New comment on post" (3 hours ago)
+- "New user registered" (5 hours ago)
+- "Project completed" (1 day ago)
+
+Design:
+- 2x2 grid for stat cards at top
+- Chart in middle section
+- Activity list on right side
+- Use shadcn/ui Card and Badge
+- Professional, clean layout

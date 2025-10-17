@@ -1,0 +1,17 @@
+Build a recipe search and viewer:
+
+Features:
+- Search input at top
+- Display recipe cards in a grid (3 columns)
+- Each card shows: image placeholder, title, cooking time, difficulty
+- Click card to see full details (ingredients list, instructions)
+- Filter by difficulty: All, Easy, Medium, Hard
+- "Favorite" button on each card (toggle star icon)
+
+Sample data (hardcoded):
+- Spaghetti Carbonara (30min, Easy)
+- Beef Wellington (2hr, Hard)
+- Caesar Salad (15min, Easy)
+- Pad Thai (45min, Medium)
+
+Design: Responsive grid, use shadcn/ui Card and Badge

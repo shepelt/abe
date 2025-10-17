@@ -1,0 +1,16 @@
+Build a simple Kanban board:
+
+Features:
+- 3 columns: To Do, In Progress, Done
+- Add task button in each column
+- Each task card shows: title, priority (High/Medium/Low), assignee
+- Drag and drop tasks between columns (bonus: if not working, add Move buttons)
+- Edit task inline (click to edit title)
+- Delete task
+- Task counter per column
+
+Design:
+- 3 equal-width columns side by side
+- Use shadcn/ui Card for tasks
+- Priority shown as colored Badge
+- Clean, professional appearance

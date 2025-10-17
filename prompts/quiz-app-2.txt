@@ -1,0 +1,19 @@
+Build a multiple-choice quiz app:
+
+Sample quiz (hardcoded):
+Q1: What is 2+2? 
+  A) 3  B) 4  C) 5  D) 6  (correct: B)
+Q2: Capital of France?
+  A) London  B) Berlin  C) Paris  D) Rome  (correct: C)
+Q3: Largest ocean?
+  A) Atlantic  B) Pacific  C) Indian  D) Arctic  (correct: B)
+
+Features:
+- Show one question at a time
+- 4 radio button options
+- "Next" button (disabled until answer selected)
+- After all questions: Show score "2/3 correct!"
+- Show correct/incorrect for each answered question
+- "Restart Quiz" button at end
+
+Design: Clean, centered layout, use shadcn/ui Button and RadioGroup

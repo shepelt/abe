@@ -1,0 +1,17 @@
+Build a habit tracker for the current week:
+
+Features:
+- Add new habit (name + target days per week)
+- Display habits in a list
+- Each habit shows:
+  - Habit name
+  - 7 checkboxes (Mon-Sun) for current week
+  - Progress: "3/7 days" or "5/5 days" with color indicator
+  - Delete button
+- Summary at top: "Total habits: X, Completed today: Y"
+- Calculate completion percentage per habit
+
+Design:
+- Use shadcn/ui Card for each habit
+- Green badge for completed habits (100%), yellow for in-progress
+- Responsive layout

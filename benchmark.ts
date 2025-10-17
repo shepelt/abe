@@ -284,10 +284,11 @@ async function copyScreenshot(
 async function runSingleRunner(
   runnerId: string,
   prompt: string,
-  keepWorkspaces: boolean
+  keepWorkspaces: boolean,
+  modelOverride?: string
 ): Promise<RunnerBenchmarkResult> {
   const runnerConfig = RUNNERS[runnerId];
-  const model = runnerConfig.defaultModel;
+  const model = modelOverride || runnerConfig.defaultModel;
 
   console.log(`\n${'='.repeat(60)}`);
   console.log(`Running: ${runnerConfig.name} (${model})`);
@@ -460,9 +461,10 @@ export async function runMultiRunnerBenchmark(
   options: {
     filter?: string;
     keepWorkspaces?: boolean;
+    model?: string;
   } = {}
 ): Promise<{ benchmarkDir: string; metadata: BenchmarkMetadata }> {
-  const { filter, keepWorkspaces = false } = options;
+  const { filter, keepWorkspaces = false, model } = options;
 
   // Parse runners to use
   const allRunners = Object.keys(RUNNERS);
@@ -504,7 +506,7 @@ export async function runMultiRunnerBenchmark(
     console.log('='.repeat(60));
 
     try {
-      const result = await runSingleRunner(runnerId, prompt, keepWorkspaces);
+      const result = await runSingleRunner(runnerId, prompt, keepWorkspaces, model);
       results.push(result);
 
       // Copy screenshot if successful
@@ -1175,6 +1177,7 @@ async function main() {
     .argument('<app-name>', 'App name (must match a built-in prompt ID or provide custom prompt)')
     .option('-f, --filter <runners>', 'Filter specific runners (comma-separated)', '')
     .option('-p, --prompt <text>', 'Custom prompt text (overrides built-in prompt)', '')
+    .option('-m, --filtermodel <model>', 'Model to use (overrides runner default)', '')
     .option('-k, --keep-workspaces', 'Keep workspaces after completion', false)
     .option('-l, --list-prompts', 'List all built-in test prompts and exit')
     .addHelpText('after', `
@@ -1193,6 +1196,7 @@ Examples:
   $ npm run benchmark -- --list-prompts                  # List all built-in prompts
   $ npm run benchmark todo-app -- --filter sigrid        # Run only sigrid runner
   $ npm run benchmark todo-app -- --filter sigrid,claude # Run multiple runners
+  $ npm run benchmark todo-app -- --filtermodel gpt-5-mini # Override model to use gpt-5-mini
   $ npm run benchmark prompts/todo-app.txt               # Run from file path
   $ npm run benchmark my-app -- --prompt "build a calc"  # Run with custom prompt
   $ npm run benchmark todo-app -- --keep-workspaces      # Keep workspaces after run
@@ -1220,6 +1224,7 @@ Examples:
   const filter = options.filter;
   const keepWorkspaces = options.keepWorkspaces;
   const customPrompt = options.prompt;
+  const model = options.filtermodel;
 
   // Validate runner filter if provided
   if (filter) {
@@ -1259,7 +1264,7 @@ Examples:
     const { benchmarkDir, metadata } = await runMultiRunnerBenchmark(
       resolvedAppName,
       prompt,
-      { filter, keepWorkspaces }
+      { filter, keepWorkspaces, model }
     );
 
     // Exit with error code if any runner failed

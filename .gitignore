@@ -8,5 +8,6 @@ node_modules/
 settings-local.json
 results/
 benchmarks/
+analysis/
 package-lock.json
 dist/
